@@ -77,7 +77,7 @@ end
 %   (a) set buffer_choice='FMQ' and buffer_offset=+1;  or
 %   (b) use a combined string like 'FMQ+1', 'NNO-0.5', 'CCO+0.3'
 buffer_choice = 'FMQ';         % 'FMQ' | 'NNO' | 'CCO'  (or 'FMQ+1' style)
-buffer_offset = +1;             % numeric Δlog10 fO2 relative to the buffer
+buffer_offset = 0;             % numeric Δlog10 fO2 relative to the buffer
 
 % --- allow combined syntax like 'FMQ+1' or 'NNO-0.5' ---
 tok = regexp(buffer_choice, '^(FMQ|NNO|CCO)\s*([+-]\s*\d*\.?\d+)?$', 'tokens', 'once');
@@ -107,10 +107,10 @@ fO2    = 10.^logfO2;                   % fO2 in bar
     fCl2 = (Cl_mes ./ CCl_calc).^2 .* (fO2.^0.5);
 
     %% fHCl from equilibrium
-    logKf_H2O = 12702 ./ T - 2.8502;
+    logKf_H2O = 12850 ./ T - 2.8675;
     KH2O = 10.^logKf_H2O;
 
-    logKf_HCl = 4856.8 ./ T + 0.3405;
+    logKf_HCl = 4894.6 ./ T + 0.3436;
     KHCl = 10.^logKf_HCl;
 
     fHCl = KHCl .* ((fH2O.^0.5) ./ (KH2O.^0.5)) .* (Cl_mes ./ CCl_calc);
@@ -166,11 +166,12 @@ fO2    = 10.^logfO2;                   % fO2 in bar
     logfS2 = 2 .* (log10(S_mes) - logCS2) + log10(fO2);
     fS2 = 10.^logfS2;
 
-    % fSO2 and fH2S from equilibrium
-    logK_SO2 = 1880 ./ T - 3.8018;
+    % fSO2 and fH2S from equilibrium (source of K Boulliung and Wood 2023
+    % Sulfur oxidation state and solubility in silicate melts)
+    logK_SO2 = 18880./T - 3.8018;
     logfSO2 = logK_SO2 + 0.5.*log10(fS2) + log10(fO2);
     fSO2 = 10.^logfSO2;
-    logK_H2S = 27103 ./ T - 4.1973;
+    logK_H2S = 27103./T - 4.1973;
     logfH2S = log10(fH2O)+logfSO2-1.5.*log10(fO2)-logK_H2S;
     fH2S = 10.^logfH2S;
      %% NBO for CO2 model
@@ -200,20 +201,29 @@ fO2    = 10.^logfO2;                   % fO2 in bar
     XFe3=Fe2O3_mol_KC.*2;
     O_tot=XSi.*2+XTi.*2+wtAl2O3./101.96.*3+XNa./2+XK./2+wtP2O5./283.889.*5+XMg+XMn+XCa+XH./2+XFe2+Fe2O3_mol_KC.*3;
     %% carbon species Eguchi and Dasgupta 2018
-    fCO2 = zeros(length(T),1);
-    fCO  = zeros(length(T),1);
-    logK_CO_CO2 = -3395 ./ T + 2.93;
-    logK_CH4    = -13466 ./ T + 5.00;
+    % --- Carbon formation constants (log10) ---
+% C(s) + O2(g)   = CO2(g)
+logKf_CO2 = 20599./T + 0.0531;
+% C(s) + 1/2 O2(g) = CO(g)
+logKf_CO  = 5839.7./T + 4.5515;
+   % --- Precompute fCO2 from melt model, and capture carbon-saturation phase ---
+n = length(T);
+fCO2 = zeros(n,1);
+phase = ones(n,1);   % 1 = fluid-sat (no C), 2 = graphite, 3 = diamond
 
-for i = 1:length(T)
-    [fCO2_i, ~, ~] = fco2_from_totalC( ...
+for i = 1:n
+    [fCO2_i, phase_i, ~] = fco2_from_totalC( ...
         P(i), T(i), totalCO2_wt(i), ...
         wtSiO2(i), wtTiO2(i), wtAl2O3(i), wtFe2O3_KC(i), wtFeO_KC(i), wtMnO(i), wtMgO(i), ...
         wtCaO(i), wtNa2O(i), wtK2O(i), wtP2O5(i), fO2(i));
-    fCO2(i) = fCO2_i;
 
-    K_COCO2 = 10.^logK_CO_CO2(i);
-    fCO(i)  = (fCO2(i) .* fH2(i) ./ fH2O(i)) ./ K_COCO2;
+    % If carbon-saturated, override fCO2 using the formation constant
+    if phase_i ~= 1
+        fCO2_i = 10.^logKf_CO2(i) * max(fO2(i), realmin);   % fCO2 = Kf_CO2 * fO2
+        fCO2_i = min(fCO2_i, 0.95*P(i));                    % cap
+    end
+    fCO2(i) = fCO2_i;
+    phase(i) = phase_i;
 end
 
     %% Calculate mole fractions from MRK EOS
@@ -280,9 +290,17 @@ for it = 1:outer_max
     if ~isfinite(fH2_new) || fH2_new <= 0, fH2_new = max(1e-6*P(i), 1.0); end
     if fH2_new > fH2_cap, fH2_new = fH2_cap; end
 
-    % CO2 + H2 = CO + H2O
-    K_COCO2 = 10^( -3395/T(i) + 2.93 );       % (log10 K)
-    fCO_new = K_COCO2 * (fCO2_i * fH2_new / fH2O_g_new);   % <-- multiply by K
+    % ---------- CO from formation constants ----------
+    fCO2_i = fCO2(i);   % use the precomputed CO2 target for this row
+    % Use the ratio when unsaturated; direct Kf when carbon-saturated
+    Kratio = 10.^(logKf_CO2(i) - logKf_CO(i));   % = Kf_CO2 / Kf_CO  (log10 base)
+    if phase(i) ~= 1
+    % carbon present: fCO = Kf_CO * fO2^0.5
+        fCO_new = 10.^logKf_CO(i) * sqrt(max(fO2(i), realmin));
+    else
+     % unsaturated: fCO = fCO2 / [(Kf_CO2/Kf_CO)*fO2^0.5]
+        fCO_new = fCO2_i / (Kratio * sqrt(max(fO2(i), realmin)));
+    end
     fCO_new = min(max(fCO_new, 0), 0.95*P(i));
 
     % SO2 from: log10(fSO2) = logK_SO2 + 0.5*log10(fS2) + log10(fO2)
@@ -434,9 +452,11 @@ aux.KH2O       = KH2O(:);
 aux.KHCl       = KHCl(:);
 aux.logK_SO2   = logK_SO2(:);
 aux.logK_H2S   = logK_H2S(:);
-aux.logK_COCO2 = logK_CO_CO2(:);
+aux.logKf_CO2 = logKf_CO2(:);
+aux.logKf_CO  = logKf_CO(:);
 aux.CCl_calc   = CCl_calc(:);
 aux.Cl_mes     = Cl_mes(:);
+aux.phaseFlag = phase;  % 1 = fluid-sat (no C), 2 = graphite, 3 = diamond
 aux.opts       = struct('tol',1e-10,'maxIter',300,'verbose',false); % MRK solver opts
 
 % --- Critical constants and kIJ you used for MRK ---
@@ -864,11 +884,52 @@ lhs = lt(aux.KH2O);   % log10 K
 rhs = lt(fEOS.fH2O) - lt(fEOS.fH2) - 0.5*lt(fEOS.fO2);
 res.H2O = lhs - rhs;
 
-% (2) CO2 + H2 = CO + H2O
-lhs = aux.logK_COCO2;
-rhs = lt(fEOS.fCO) + lt(fEOS.fH2O) - lt(fEOS.fCO2) - lt(fEOS.fH2);
-res.COCO2 = lhs - rhs;
+% Helper
+lt = @(x) log10(max(x, realmin));
 
+% Masks
+if isfield(aux,'phaseFlag') && numel(aux.phaseFlag)==numel(T)
+    mask_sat   = (aux.phaseFlag ~= 1);  % carbon present (graphite/diamond)
+    mask_unsat = (aux.phaseFlag == 1);  % fluid-saturated, no C(s)
+else
+    mask_sat   = true(size(T));   % fallback if no flag provided
+    mask_unsat = false(size(T));
+end
+
+% Formation checks (apply ONLY where carbon is present)
+if isfield(aux,'logKf_CO2')
+    res.CO2_form = zeros(size(T));
+    m = mask_sat;
+    res.CO2_form(m) = lt(fEOS.fCO2(m)) - (aux.logKf_CO2(m) + lt(fEOS.fO2(m)));
+end
+if isfield(aux,'logKf_CO')
+    res.CO_form = zeros(size(T));
+    m = mask_sat;
+    res.CO_form(m) = lt(fEOS.fCO(m)) - (aux.logKf_CO(m) + 0.5*lt(fEOS.fO2(m)));
+end
+
+% Water–gas check for UNSATURATED rows:
+% Prefer the thermodynamically-consistent K from your inputs:
+if any(mask_unsat)
+    res.COCO2 = zeros(size(T));
+    m = mask_unsat;
+
+    use_composite = isfield(aux,'logKf_CO') && isfield(aux,'logKf_CO2') && isfield(aux,'KH2O') && ...
+                    ~isempty(aux.logKf_CO) && ~isempty(aux.logKf_CO2) && ~isempty(aux.KH2O);
+
+    if use_composite
+        log10_Kwg = aux.logKf_CO(m) + lt(aux.KH2O(m)) - aux.logKf_CO2(m);  % log10 K_wg
+    else
+        % fallback to legacy constant if composite pieces absent
+        if ~isfield(aux,'logK_COCO2') || isempty(aux.logK_COCO2)
+            aux.logK_COCO2 = -3395./T + 2.93;   % log10
+        end
+        log10_Kwg = aux.logK_COCO2(m);
+    end
+
+    rhs = lt(fEOS.fCO(m)) + lt(fEOS.fH2O(m)) - lt(fEOS.fCO2(m)) - lt(fEOS.fH2(m));
+    res.COCO2(m) = log10_Kwg - rhs;
+end
 % (3) H2S + 3/2 O2 = H2O + SO2   (equivalent to your rearranged form)
 lhs = aux.logK_H2S;
 rhs = lt(fEOS.fH2O) + lt(fEOS.fSO2) - lt(fEOS.fH2S) - 1.5*lt(fEOS.fO2);
