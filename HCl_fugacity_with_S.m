@@ -1,3 +1,15 @@
+%C-H-O-S-Cl speciation written by M.K. Rusiecka Department of Earth
+%Sciences University of Oxford 
+%This program calculates water fugacity based on H2O activity in the melt
+%(Burnham 1979); carbon species - Eguchi and Dasgupta 2018; S species -
+%Boulliung and Wood 2022, 2023; HCl and Cl2 fugacity - Rusiecka and Wood (in
+%preparation); Holloway-type MRK EOS is used to calculate mole fractions of
+%fluid species and adjust fugacities accordingly;
+%This program can be used to calculate composition of a gas that would be
+%in equilibrium with a melt (for example a set of melt inlcusions; as input
+%you have to set P, T, composition anf fO2 (fO2 is set starting line 87 -
+%you choose a buffer (FMQ, NNO, CCO) and set offset, buffer choice is line
+%93 and offset is line 94
 function HCl_fugacity_with_S()
     clear; clc;
 
