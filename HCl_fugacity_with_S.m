@@ -30,7 +30,6 @@ function HCl_fugacity_with_S()
     P2O5_mol=(bulkComp(14,:)./(283.889/2))';
     H2O_mol=(bulkComp(15,:)./(18.01528/2))';
     Cl_mol=(bulkComp(18,:)./35.45)';
-    totalCO2_wt=bulkComp(16,:)';
     CatSum = SiO2_mol + TiO2_mol + Al2O3_mol + FeO_mol + MgO_mol + CaO_mol + Na2O_mol + K2O_mol + Cr2O3_mol + MnO_mol + P2O5_mol + H2O_mol;
     ntot = SiO2_mol + TiO2_mol + (bulkComp(3,:)./(101.96))' + FeO_mol + CaO_mol + (bulkComp(12,:)./(61.97))' + (bulkComp(13,:)./(94.2))' + (bulkComp(9,:)./(75.995))' + (bulkComp(14,:)./(283.889))' + (bulkComp(15,:)./(18.01528))' + MnO_mol; %sum of moles for Kress and Carmichael 1991
     % Mole fractions
@@ -42,8 +41,10 @@ function HCl_fugacity_with_S()
     XNa2O = Na2O_mol ./ CatSum;
     XAl2O3 = Al2O3_mol ./ CatSum;
     XMnO = MnO_mol./CatSum;
-
+    XCl=Cl_mol./CatSum;
     Cl_mes = bulkComp(18,:)'; % Cl measured in wt%
+    totalCO2_wt=bulkComp(16,:)'; %CO2 in wt. %
+    totalCO2_wt(totalCO2_wt <= 0 | isnan(totalCO2_wt)) = 1e-20; %if there is no CO2 data or CO2=0 it is getting replaced by CO2(wt.%)=1e-20 so the code can still work
     % --- New: Calculate oxygen moles ---
     O_moles = 2*SiO2_mol + 2*TiO2_mol + 3*(bulkComp(3,:)./(101.96))' + FeO_mol + MgO_mol + CaO_mol + ...
           (bulkComp(12,:)./(61.97))' + (bulkComp(13,:)./(94.2))' + 3*Cr2O3_mol + MnO_mol + 5*(bulkComp(14,:)./(283.889))'+ (bulkComp(15,:)./(18.01528))';
@@ -76,20 +77,29 @@ end
 % You can either:
 %   (a) set buffer_choice='FMQ' and buffer_offset=+1;  or
 %   (b) use a combined string like 'FMQ+1', 'NNO-0.5', 'CCO+0.3'
-buffer_choice = 'FMQ';         % 'FMQ' | 'NNO' | 'CCO'  (or 'FMQ+1' style)
+% Assumptions: T in Kelvin, P in bar; (P-1)/T term uses 1 bar reference.
+buffer_choice = 'NNO';         % 'FMQ' | 'NNO' | 'CCO'  (or 'FMQ+1' style)
 buffer_offset = 0;             % numeric Δlog10 fO2 relative to the buffer
 
-% --- allow combined syntax like 'FMQ+1' or 'NNO-0.5' ---
-tok = regexp(buffer_choice, '^(FMQ|NNO|CCO)\s*([+-]\s*\d*\.?\d+)?$', 'tokens', 'once');
-if isempty(tok)
-    error('buffer_choice must be ''FMQ'', ''NNO'', or ''CCO'', optionally with an offset like ''FMQ+1''.');
+% --- input checks (optional) ---
+assert(isnumeric(T) && isnumeric(P), 'T and P must be numeric.');
+assert(all(T(:) > 0), 'T must be in Kelvin and > 0.');
+if ~isscalar(T) && ~isscalar(P)
+    assert(isequal(size(T), size(P)), 'T and P must be the same size or one must be scalar.');
 end
-base = tok{1};
+
+% --- allow combined syntax like 'FMQ+1' or 'NNO-0.5' (robust to spaces/case/unicode minus) ---
+s = regexprep(strtrim(buffer_choice), char(8722), '-');  % U+2212 → '-'
+tok = regexp(lower(s), '^\s*(fmq|nno|cco)\s*([+-]\s*\d*\.?\d+)?\s*$', 'tokens', 'once');
+if isempty(tok)
+    error('buffer_choice must be FMQ, NNO, or CCO, optionally with an offset like FMQ+1.');
+end
+base = upper(tok{1});
 if numel(tok) > 1 && ~isempty(tok{2})
     buffer_offset = buffer_offset + str2double(regexprep(tok{2}, '\s+', ''));
 end
 
-% --- base log10(fO2) for each buffer (same formulations you used) ---
+% --- base log10(fO2) for each buffer ---
 switch base
     case 'FMQ'
         base_logfO2 = (-25096.3 ./ T + 8.735 + 0.110 .* (P - 1) ./ T);
@@ -102,7 +112,6 @@ end
 % --- apply user offset and exponentiate ---
 logfO2 = base_logfO2 + buffer_offset;  % log10 fO2 relative to chosen buffer
 fO2    = 10.^logfO2;                   % fO2 in bar
-
     %% fCl2 from Cl capacity
     fCl2 = (Cl_mes ./ CCl_calc).^2 .* (fO2.^0.5);
 
@@ -157,23 +166,79 @@ fO2    = 10.^logfO2;                   % fO2 in bar
     XK2O_KC = K2O_mol ./ CatSum_KC;
     XMnO_KC = MnO_mol./CatSum_KC;
     %% Calculate S from Boulliung and Wood 2022 & 2023
-    % Get S in wt%
-    S_mes = bulkComp(17,:)'; % S in wt. %!!!
-    S_mes(S_mes <= 0) = 1e-10; % avoid log(0)
+%% Sulfur: use BOTH sulfide and sulfate capacities to solve fS2 (base-10 logs)
+% Measured total S in the melt (wt%)
+S_mes = bulkComp(17,:)'; 
+S_mes(S_mes <= 0) = 1e-10; % avoid log(0)
 
-    % Calculate logCS2 and fS2
-    logCS2 = 0.225 + (25237.*XFeO_KC + 5214.*XCaO_KC + 12705.*XMnO_KC + 19828.*XK2O_KC - 1109.*XSiO2_KC - 8879) ./ T + ((P-1).*6.2e-3)./(2.303.*R.*T);
-    logfS2 = 2 .* (log10(S_mes) - logCS2) + log10(fO2);
-    fS2 = 10.^logfS2;
+% ---------- (A) Sulfide capacity (as you had, log10 form) ----------
+% NOTE: these X_*_KC are on your KC-normalized basis (CatSum_KC). Keep consistent with the calibration you used.
+logCS2 = 0.225 + (25237.*XFeO_KC + 5214.*XCaO_KC + 12705.*XMnO_KC + 19828.*XK2O_KC - 1109.*XSiO2_KC - 8879) ./ T ...
+                  + ((P-1).*6.2e-3)./(2.303.*R.*T);   % log10 C_S2-
 
+% ---------- (B) Sulfate capacity (your new relation, log10 base) ----------
+% Use anhydrous oxide mole-fraction basis (commonly used in capacity calibrations).
+CatSum_anh = SiO2_mol + TiO2_mol + Al2O3_mol + FeO_mol + MgO_mol + CaO_mol + ...
+             Na2O_mol + K2O_mol + Cr2O3_mol + MnO_mol + P2O5_mol;   % exclude H2O
+
+XNa2O_anh  = Na2O_mol  ./ CatSum_anh;
+XCaO_anh   = CaO_mol   ./ CatSum_anh;
+XMgO_anh   = MgO_mol   ./ CatSum_anh;
+XMnO_anh   = MnO_mol   ./ CatSum_anh;
+XAl2O3_anh = Al2O3_mol ./ CatSum_anh;
+
+% Your supplied formula (log10 base):
+% logCS6 = -213.65 + (25696 XNa2O + 15076 XCaO + 9543 XMgO + 16158 XMnO + 4316 XAl2O3 + 68254)/T + 55.03 log10(T)
+logCS6 = -213.65 + ...
+         (25696.*XNa2O_anh + 15076.*XCaO_anh + 9543.*XMgO_anh + 16158.*XMnO_anh + 4316.*XAl2O3_anh + 68254)./T + ...
+         55.03.*log10(T);
+
+% ---------- (C) Solve mass balance S_tot = S(2-) + SO4(2-) for fS2 ----------
+% Equilibrium constant for SO2 formation (log10)
+logK_SO2 = 18880./T - 3.8018;
+lt  = @(x) log10(max(x, realmin));   % safe log10
+ten = @(x) 10.^x;
+
+n = numel(T);
+fS2  = zeros(n,1);
+fSO2 = zeros(n,1);
+
+for i = 1:n
+    logfO2_i  = lt(fO2(i));
+    logCS2_i  = logCS2(i);
+    logCS6_i  = logCS6(i);
+    S_tot_i   = S_mes(i);          % wt% (ensure same units as capacities)
+
+    % Mass-balance residual in wt% (unknown is log10 fS2)
+    % S2- (wt%)  = 10^logCS2 * fS2^(1/2) * fO2^(-1/2)
+    % SO4 (wt%)  = 10^logCS6 * fS2^(1/2) * fO2^(+3/2)   [from your definition]
+    massbal = @(logfS2) ...
+        ( ten(logCS2_i) .* ten( 0.5*logfS2 - 0.5*logfO2_i ) ) + ...
+        ( ten(logCS6_i) .* ten( 0.5*logfS2 + 1.5*logfO2_i ) ) - S_tot_i;
+
+    % Bracket and solve
+    lo = -30; hi = 5;
+    if massbal(lo)*massbal(hi) > 0
+        lo = lo - 10; hi = hi + 5;
+    end
+    logfS2_i = fzero(massbal, [lo, hi]);
+    fS2(i)   = ten(logfS2_i);
+
+    % Gas equilibrium linking SO2 (log10 fSO2 = logK_SO2 + 0.5 log fS2 + log fO2)
+    fSO2(i)  = ten(logK_SO2(i)) * sqrt(max(fS2(i), realmin)) * max(fO2(i), realmin);
+end
+
+% ---------- (D) Now H2S from your equilibrium (unchanged) ----------
+logK_H2S = 27103./T - 4.1973;  % (you already defined above, keep it consistent)
+logfH2S = lt(fH2O) + lt(fSO2) - 1.5*lt(fO2) - logK_H2S;
+fH2S    = 10.^logfH2S;
+
+% ---------- (E) Optional diagnostics you might find handy ----------
+S2m_wt   = 10.^logCS2 .* sqrt(fS2) ./ sqrt(fO2);      % predicted melt S2- (wt%)
+SO4m_wt  = 10.^logCS6 .* sqrt(fS2) .* (fO2.^(1.5));   % predicted melt SO4(2-) (wt%)
+frac_SO4 = SO4m_wt ./ max(S2m_wt + SO4m_wt, eps);     % fraction of melt S as sulfate
     % fSO2 and fH2S from equilibrium (source of K Boulliung and Wood 2023
-    % Sulfur oxidation state and solubility in silicate melts)
-    logK_SO2 = 18880./T - 3.8018;
-    logfSO2 = logK_SO2 + 0.5.*log10(fS2) + log10(fO2);
-    fSO2 = 10.^logfSO2;
-    logK_H2S = 27103./T - 4.1973;
-    logfH2S = log10(fH2O)+logfSO2-1.5.*log10(fO2)-logK_H2S;
-    fH2S = 10.^logfH2S;
+    % Sulfur oxidation state and solubility in silicate melts
      %% NBO for CO2 model
     ox_total=(bulkComp(1,:))'+(bulkComp(2,:))'+(bulkComp(3,:))'+(bulkComp(10,:))'+(bulkComp(8,:))'+(bulkComp(11,:))'+(bulkComp(12,:))'+(bulkComp(13,:))'+(bulkComp(14,:))'+(bulkComp(15,:))'+wtFe2O3_KC+wtFeO_KC;
     wtSiO2=(bulkComp(1,:))'./ox_total.*100;
@@ -380,9 +445,9 @@ end
         warning('Row %d: Σ f/(φP) = %.3f at P=%.2f bar, T=%.1f K. Check equilibrium inputs/units.', ...
             i, info_i.sum_f_over_phiP, P(i), T(i));
     end
-fprintf('   Temp (K)|    X(HCl) |  X(H2O)| X(Cl2)|  X(H2) | X(SO2)| X(H2S)| X(CO2)| X(CO)\n');
+fprintf('   Temp (K) |   X(HCl) |  X(H2O) | X(Cl2) |  X(H2) |  X(SO2) |  X(H2S) |  X(CO2) | X(CO)\n');
 for i = 1:length(T)
-   fprintf('%10.1f | %8.5f | %7.5f | %6.5f | %7.5f | %6.5f | %6.5f | %6.5f | %6.5f\n ', ...
+   fprintf('%10.1f  | %8.5f | %7.5f | %6.5f | %7.5f | %6.5f | %6.5f | %6.5f | %6.5f\n ', ...
     T(i), mole_fractions(i,:));
 end
 %% Display fugacity output (using EOS-consistent values)
@@ -403,8 +468,6 @@ for i = 1:length(T)
         safeLog10(fCO2_eos(i)), ...
         safeLog10(fCO_eos(i)));
 end
-
-   %% Plot fugacities
 %% Plot fugacities (EOS-consistent)
 figure; hold on;
 plot(P, safeLog10(fO2),     'ko', 'DisplayName', 'log fO2');
@@ -417,7 +480,7 @@ plot(P, safeLog10(fH2S_eos),'ms', 'DisplayName', 'log fH2S');
 plot(P, safeLog10(fCO2_eos),'bs', 'DisplayName', 'log fCO2');
 plot(P, safeLog10(fCO_eos), 'gs', 'DisplayName', 'log fCO');
 xlabel('Pressure (bar)'); ylabel('log Fugacity (bar)');
-legend('Location', 'best'); title('Fugacity vs Pressure (EOS-consistent)'); grid on;
+legend('Location', 'best'); title('Fugacity vs Pressure'); grid on;
    %% Plot mole fractions
 figure; hold on;
 plot(P, mole_fractions(:,1), 'ro', 'DisplayName', 'X HCl');
@@ -750,7 +813,7 @@ if totalCO2_wt >= Cmax_wt*(1 - 1e-6)
 end
 
 % ------------------ Otherwise: solve C_model(fCO2) = C_target in [fmin, f_graph]
-fmin = 1e-9; % bar (very reducing / low fCO2)
+fmin = 1e-20; % bar (very reducing / low fCO2)
 fun  = @(lnf) (dissolvedCO2_at_f(exp(lnf)) - totalCO2_wt);
 % Use log-bracketing for better conditioning
 ln_low  = log(max(fmin, realmin));
@@ -846,7 +909,7 @@ if ~isfield(aux,'KHCl') || isempty(aux.KHCl)
     end
 end
 if ~isfield(aux,'logK_SO2') || isempty(aux.logK_SO2)
-    aux.logK_SO2 = 1880./T - 3.8018;          % log10 K for: S2 + O2 = 2 SO2  (as used in your code)
+    aux.logK_SO2 = 18880./T - 3.8018;          % log10 K for: S2 + O2 = 2 SO2  (as used in your code)
 end
 if ~isfield(aux,'logK_H2S') || isempty(aux.logK_H2S)
     aux.logK_H2S = 27103./T - 4.1973;         % log10 K for: H2S + 3/2 O2 = H2O + SO2  (rearranged in code)
