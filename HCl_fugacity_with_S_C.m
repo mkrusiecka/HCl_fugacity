@@ -2,20 +2,22 @@ function Out = HCl_fugacity_with_S_C(~, opts)
 % HCl_fugacity_with_S_C
 % Strict melt–fluid equilibrium at given (P,T): compute melt-side fugacities f_i,
 % then map to gas y_i and φ_i with MRK
-%   H2O_model:  'Moore' | 'Burnham'
-%   CO2_model:  'EguchiDasgupta'     (only)
+%
+% H2O_model:  'Moore' | 'Burnham'
+%
+% CO2_model: 'EguchiDasgupta' (only)
 %
 % CH4 equilibrium (Ohmoto & Kerrick, 1977):
 %   CH4 + 2 O2 = CO2 + 2 H2O
 %   log10 K = 41997/T + 0.719*log10(T) - 2.404   (T in K)
 %
-% Input file: 'MI_Gas_Speciation2.csv'
+% Input file: 'MI_Gas_SpeciationGEOROC.csv'
 % This version normalizes each row (oxides + H2O + CO2 + S + Cl) to 100 wt%.
 
     %% ---------------- Options ----------------
     if nargin < 2, opts = struct; end
     if ~isfield(opts,'H2O_model'),     opts.H2O_model     = 'Moore'; end
-    if ~isfield(opts,'buffer_choice'), opts.buffer_choice = 'NNO+0.3'; end
+    if ~isfield(opts,'buffer_choice'), opts.buffer_choice = 'NNO+0.77'; end
     if ~isfield(opts,'doPlots'),       opts.doPlots       = true; end
     if ~isfield(opts,'outCSV'),        opts.outCSV        = 'Fugacities_STRICT.csv'; end
 
@@ -41,7 +43,9 @@ function Out = HCl_fugacity_with_S_C(~, opts)
     P  = pressure(:);          % bar
     PG = P/1e4;                % GPa
 
-    % Oxide -> moles 
+    % Oxide -> moles (note: these are formula-unit moles for oxides,
+    % cation-based for some (e.g., Al2O3_mol uses 101.96/2), consistent with
+    % original code where CatSum/ntot are defined.)
     SiO2_mol=(bulkComp(1,:)./60.08)';                    TiO2_mol=(bulkComp(2,:)./79.866)';
     Al2O3_mol=(bulkComp(3,:)./(101.96/2))';              FeO_mol=(bulkComp(6,:)./71.844)';
     MgO_mol=(bulkComp(8,:)./40.3044)';                   CaO_mol=(bulkComp(11,:)./56.0774)';
@@ -53,28 +57,24 @@ function Out = HCl_fugacity_with_S_C(~, opts)
     CatSum = SiO2_mol + TiO2_mol + Al2O3_mol + FeO_mol + MgO_mol + CaO_mol + Na2O_mol + K2O_mol + Cr2O3_mol + MnO_mol + P2O5_mol + H2O_mol;
     ntot   = SiO2_mol + TiO2_mol + (bulkComp(3,:)./(101.96))' + FeO_mol + CaO_mol + (bulkComp(12,:)./(61.97))' + (bulkComp(13,:)./(94.2))' + (bulkComp(9,:)./(75.995))' + (bulkComp(14,:)./(283.889))' + (bulkComp(15,:)./(18.01528))' + MnO_mol;
 
-    % Cation-sum mole fractions
+    % Cation-sum mole fractions (used e.g. in Cl capacity)
     XCaO  = CaO_mol ./ CatSum;  XSiO2 = SiO2_mol ./ CatSum;  XFeO = FeO_mol ./ CatSum;
-    XK2O  = K2O_mol ./ CatSum;  XNa2O = Na2O_mol ./ CatSum;  % (XMgO if you need it later)
+    XK2O  = K2O_mol ./ CatSum;  XNa2O = Na2O_mol ./ CatSum; XMgO = MgO_mol./CatSum;
 
     % Volatiles / measured
     Cl_mes      = bulkComp(18,:)';                % wt% Cl
     totalCO2_wt = bulkComp(16,:)'; totalCO2_wt(totalCO2_wt<=0 | isnan(totalCO2_wt)) = 1e-40;
 
-    % Oxygen moles for Burnham basis
+    % Oxygen moles for Burnham H2O basis
     O_moles = 2*SiO2_mol + 2*TiO2_mol + 3*(bulkComp(3,:)./(101.96))' + FeO_mol + MgO_mol + CaO_mol + ...
               (bulkComp(12,:)./(61.97))' + (bulkComp(13,:)./(94.2))' + 3*Cr2O3_mol + MnO_mol + 5*(bulkComp(14,:)./(283.889))'+ (bulkComp(15,:)./(18.01528))';
     X_H2O_O = max(0, min(1, H2O_mol_ox .*(8./O_moles)));
 
    %% Cl capacity
-    logC      = 1.492+(4331.*XCaO-3508.*XSiO2+2440.*XFeO-3921.*XK2O-741.*(PG))./T;
+    logC      = 1.15+(4359.*XCaO-3055.*XSiO2+2059.*XFeO-3875.*XK2O+163.*XMgO-514.*(PG))./T;
     CCl_calc  = 10.^logC;
     logKf_H2O = 12850 ./ T - 2.8675;     KH2O = 10.^logKf_H2O;
     logKf_HCl = 4894.6 ./ T + 0.3436;    KHCl = 10.^logKf_HCl;
-
-    %% S equilibrium constants
-    logK_SO2 = 18880./T - 3.8018;  % SO2 = 0.5 S2 + O2
-    logK_H2S = 27103./T - 4.1973;  % H2S + 1.5 O2 = H2O + 0.5 S2
 
     %% ---------------- MRK species ------------------
     species = {'HCl','H2O','Cl2','H2','SO2','H2S','CO2','CO','CH4'};
@@ -94,7 +94,7 @@ function Out = HCl_fugacity_with_S_C(~, opts)
         switch base
             case 'FMQ', base_logfO2 = (-25096.3 ./ Tkel + 8.735 + 0.110 .* (Pbar - 1) ./ Tkel);
             case 'NNO', base_logfO2 = (-24930   ./ Tkel + 9.36  + 0.046 .* (Pbar - 1) ./ Tkel);
-            case 'CCO', base_logfO2 = (4.325 - (21803 ./ Tkel) + 0.171 .* ((Pbar - 1) ./ Tkel) - 0.2);
+            case 'CCO', base_logfO2 = (4.325 - (21803 ./ Tkel) + 0.171 .* ((Pbar - 1) ./ Tkel));
         end
         fO2_bar = 10.^(base_logfO2 + buffer_offset);
         fO2_bar = max(fO2_bar, realmin);
@@ -127,10 +127,14 @@ function Out = HCl_fugacity_with_S_C(~, opts)
         phi = exp(lnphi); if ~isfinite(phi) || phi <= 0, phi = 1.0; end
     end
 
-    %% ---------------- fO2 @ input P; H2O model (Moore/Burnham) ----------------
+    %% ---------------- fO2 @ input P ----------------
     fO2 = fO2_from_buffer(P, T, opts.buffer_choice);
+    fO2 = max(fO2, realmin);
 
+    %% ---------------- H2O model (Moore / Burnham only) ----------------
     H2O_model = validatestring(opts.H2O_model, {'Moore','Burnham'});
+    fH2O_target = zeros(size(T));
+
     switch H2O_model
         case 'Moore'
             CatSum_an  = SiO2_mol+TiO2_mol+(bulkComp(3,:)./(101.96))'+FeO_mol+ ...
@@ -140,7 +144,7 @@ function Out = HCl_fugacity_with_S_C(~, opts)
             XH2O_an   = (bulkComp(15,:)./(18.01528))'./CatSum_an;
             XNa2O_an  = (bulkComp(12,:)./(61.97))'./CatSum_an;
             a_M=2565; bAl=-1.997; bFe=-0.9275; bNa=2.736; c=1.171; d=-14.21;
-            B_M    = (bAl*XAl2O3_an + bFe*XFeO_an + bNa*XNa2O_an) .* ((P/1000)./T);
+            B_M    = (bAl*XAl2O3_an + bFe*XFeO_an + bNa*XNa2O_an) .* ((P)./T);
             lnfH2O = (2*log(XH2O_an) - a_M./T - B_M - d)./c;
             fH2O_target = exp(lnfH2O);   % bar
 
@@ -164,33 +168,92 @@ function Out = HCl_fugacity_with_S_C(~, opts)
             fH2O_target = aH2O .* (phiH2O_pure .* P)./Po; % bar
     end
 
-    % guards
-    Cl_mes      = max(Cl_mes,      realmin);
-    CCl_calc    = max(CCl_calc,    realmin);
     fH2O_target = max(fH2O_target, realmin);
-    fO2         = max(fO2,         realmin);
+    Cl_mes   = max(Cl_mes,   realmin);
+    CCl_calc = max(CCl_calc, realmin);
 
-    %% ---------------- Kress & Carmichael Fe3+/Fe2+ ----------------
-    XFeO_cat = FeO_mol./ntot; XCaO_cat = CaO_mol./ntot;
+    %% ---------------- Kress & Carmichael Fe3+/Fe2+ (anhydrous oxide basis) ----------------
+    % Build anhydrous oxides (SiO2..P2O5) from bulkComp, renormalized to 100 wt%
+    ox_anh     = bulkComp(1:14,:);                        % major oxides only
+    ox_anh_sum = sum(ox_anh,1);
+    ox_anh_sum(ox_anh_sum <= 0) = 1;                      % avoid division by zero
+    scale_ox_anh = 100 ./ ox_anh_sum;
+    ox_anh     = ox_anh .* scale_ox_anh;                  % each column sums to 100 wt% anhydrous
+
+    % Extract anhydrous wt% for K&C-relevant oxides
+    wtSiO2_anh   = ox_anh(1,:)';
+    wtTiO2_anh   = ox_anh(2,:)';
+    wtAl2O3_anh  = ox_anh(3,:)';
+    wtFeOtot_anh = ox_anh(6,:)';   % all Fe as FeO* here
+    wtMgO_anh    = ox_anh(8,:)';
+    wtMnO_anh    = ox_anh(10,:)';
+    wtCaO_anh    = ox_anh(11,:)';
+    wtNa2O_anh   = ox_anh(12,:)';
+    wtK2O_anh    = ox_anh(13,:)';
+    wtP2O5_anh   = ox_anh(14,:)';
+
+    % Convert to moles of oxide formula units
+    nSiO2  = wtSiO2_anh   ./ 60.08;
+    nTiO2  = wtTiO2_anh   ./ 79.866;
+    nAl2O3 = wtAl2O3_anh  ./ 101.96;
+    nFeOtot= wtFeOtot_anh ./ 71.844;
+    nMgO   = wtMgO_anh    ./ 40.3044;
+    nMnO   = wtMnO_anh    ./ 70.9374;
+    nCaO   = wtCaO_anh    ./ 56.0774;
+    nNa2O  = wtNa2O_anh   ./ 61.979;
+    nK2O   = wtK2O_anh    ./ 94.2;
+    nP2O5  = wtP2O5_anh   ./ 141.944;
+
+    n_tot_ox = nSiO2 + nTiO2 + nAl2O3 + nFeOtot + nMgO + nMnO + nCaO + nNa2O + nK2O + nP2O5;
+    n_tot_ox = max(n_tot_ox, realmin);
+
+    % Oxide mole fractions on anhydrous basis (for K&C compositional terms)
+    XAl2O3_ox = nAl2O3  ./ n_tot_ox;
+    XFeO_ox   = nFeOtot ./ n_tot_ox;    % total Fe as FeO* here
+    XCaO_ox   = nCaO    ./ n_tot_ox;
+    XNa2O_ox  = nNa2O   ./ n_tot_ox;
+    XK2O_ox   = nK2O    ./ n_tot_ox;
+
+    % ln( XFe2O3 / XFeO ) from Kress & Carmichael (1991) with oxide mole fractions
     lnXFe3XFe2 = 0.196*log(fO2) + 11492./T - 6.675 + ...
-                 (-2.243*(bulkComp(3,:)./(101.96))' + 5.854*(bulkComp(12,:)./(61.97))' + ...
-                  -1.828*XFeO_cat + 6.215*(bulkComp(13,:)./(94.2))' + 3.201*XCaO_cat);
-    XFe3XFe2 = exp(lnXFe3XFe2);
-    n_Fe2O3 = (ntot.*XFe3XFe2.*FeO_mol)./(ntot).*(1./(1+(ntot.*XFe3XFe2.*2)./(ntot)));
-    n_FeO   = FeO_mol - 2.*(n_Fe2O3);
-    wtFeO_KC   = (2.*((XFe3XFe2.*(n_FeO./ntot))./(1.0776-XFe3XFe2.*0.0776)).*1.0776).*(55.845+15.999)./ ...
-                 (sum(bulkComp([1 2 3 10 8 11 12 13 14 15],:),1)' + n_FeO.*(55.845+15.999)+n_Fe2O3.*(55.845*2+15.999*3)).*100;
-    wtFe2O3_KC = (2.*((XFe3XFe2.*(n_FeO./ntot))./(1.0776-XFe3XFe2.*0.0776))).*(79.846)./ ...
-                 (sum(bulkComp([1 2 3 10 8 11 12 13 14 15],:),1)' + n_FeO.*(55.845+15.999)+n_Fe2O3.*(55.845*2+15.999*3)).*100;
-    FeO_mol_KC   = wtFeO_KC/(55.845+15.999);
-    Fe2O3_mol_KC = wtFe2O3_KC/(159.66/2);
+                 (-2.243*XAl2O3_ox + 5.854*XNa2O_ox - 1.828*XFeO_ox + ...
+                  6.215*XK2O_ox + 3.201*XCaO_ox);
+    R_Fe3_Fe2_ox = exp(lnXFe3XFe2);          % ≈ XFe2O3 / XFeO (oxide-mole basis)
+    R_Fe3_Fe2_ox = max(R_Fe3_Fe2_ox, realmin);
 
-    %% ---------------- Sulfur capacities → fS2 → fSO2, fH2S ----------------
+    % Split total Fe (as FeO*) between FeO and Fe2O3 on oxide basis:
+    % Let nFeOtot be moles of FeO*; then:
+    %   n_Fe2O3 = R * nFeOtot / (2R + 1)
+    %   n_FeO   = nFeOtot - 2*n_Fe2O3
+    nFeO_tot = nFeOtot;
+    n_Fe2O3  = (R_Fe3_Fe2_ox .* nFeO_tot) ./ (2.*R_Fe3_Fe2_ox + 1);
+    n_FeO    = nFeO_tot - 2.*n_Fe2O3;
+
+    % Convert FeO and Fe2O3 moles back to wt% in the full bulk (including volatiles)
+    M_FeO   = 71.844;
+    M_Fe2O3 = 159.688;
+
+    mass_FeO   = n_FeO   .* M_FeO;
+    mass_Fe2O3 = n_Fe2O3 .* M_Fe2O3;
+
+    % Mass of all other components taken from current bulkComp
+    % (1..18 are normalized to 100; remove original FeO row 6, then add new FeO & Fe2O3)
+    mass_other = sum(bulkComp([1:5 7:14 15:18],:),1)';  % everything except original FeO
+    total_mass = mass_other + mass_FeO + mass_Fe2O3;
+    total_mass = max(total_mass, realmin);
+
+    wtFeO_KC   = mass_FeO   ./ total_mass * 100;
+    wtFe2O3_KC = mass_Fe2O3 ./ total_mass * 100;
+
+    FeO_mol_KC   = wtFeO_KC   ./ M_FeO;
+    Fe2O3_mol_KC = wtFe2O3_KC ./ M_Fe2O3;
+
+    %% ---------------- Sulfur capacities → fS2 → fSO2 (needs Fe redox) ----------------
     % 1-O basis for capacity regressions
-    n_SiO2  = (bulkComp(1,:)/60.08/2)';   n_TiO2  = (bulkComp(2,:)/79.866/2)';
+    n_SiO2  = (bulkComp(1,:)/(60.08/2))';   n_TiO2  = (bulkComp(2,:)/(79.866/2))';
     n_Al2O3 = (bulkComp(3,:)/(101.96/3))'; n_FeO2p = FeO_mol_KC; n_Fe2O3 = Fe2O3_mol_KC;
     n_MnO   = MnO_mol; n_MgO = MgO_mol;  n_CaO = CaO_mol;
-    n_Na2O  = (bulkComp(12,:)/(61.97))';  n_K2O = (bulkComp(13,:)/(94.2/2))';
+    n_Na2O  = (bulkComp(12,:)/(61.97))';  n_K2O = (bulkComp(13,:)/(94.2))';
     O_tot1  = n_SiO2+n_TiO2+n_Al2O3+n_FeO2p+n_Fe2O3+n_MnO+n_MgO+n_CaO+n_Na2O+n_K2O;
 
     X_Si05O    = n_SiO2  ./ O_tot1; 
@@ -215,7 +278,9 @@ function Out = HCl_fugacity_with_S_C(~, opts)
     logCS6 = logCS6_base + ((P - 1) .* 2.92) ./ (T.*8.314.*2.303);
 
     S_mes = bulkComp(17,:)'; S_mes(S_mes <= 0 | isnan(S_mes)) = 1e-12;
-
+    % S equilibrium constants (Ohmoto-style parameterization; T in K; base-10 logs)
+    logK_SO2 = 18880./T - 3.8018;  % SO2 = 0.5 S2 + O2
+    logK_H2S = 27103./T - 4.1973;  % H2S + 1.5 O2 = H2O + 0.5 S2
     fS2  = zeros(size(P)); fSO2 = zeros(size(P)); fH2S = zeros(size(P));
     lt = @(x) log10(max(x, realmin)); ten = @(x) 10.^x;
     for i = 1:numel(P)
@@ -248,7 +313,7 @@ function Out = HCl_fugacity_with_S_C(~, opts)
         [fCO2_i, phase_i, ~] = fco2_from_totalC( ...
             P(i), T(i), totalCO2_wt(i), ...
             wSi(i), wTi(i), wAl(i), wFe2O3(i), wFeO(i), wMn(i), wMg(i), ...
-            wCa(i), wNa(i), wK(i), wP(i), fO2(i), fH2O_target(i));
+            wCa(i), wNa(i), wK(i), wP(i), fO2(i), []); % last arg (wtH2O) unused internally
         if phase_i ~= 1
             % carbon-saturated: cap via CO2 formation constant
             fCO2_i = min( 10.^(20599./T(i) + 0.0531) * fO2(i), 0.95*P(i) );
@@ -258,7 +323,7 @@ function Out = HCl_fugacity_with_S_C(~, opts)
     end
 
     %% ---------------- Other volatiles at (P,T) ----------------
-    % Chlorine system (Rusiecka & Wood 2025)
+    % Chlorine system (Rusiecka & Wood 2026)
     fHCl = KHCl .* sqrt( fH2O_target ./ KH2O ) .* ( Cl_mes ./ CCl_calc );
     fCl2 = (Cl_mes ./ CCl_calc).^2 .* sqrt(fO2);
 
@@ -266,6 +331,8 @@ function Out = HCl_fugacity_with_S_C(~, opts)
     fH2 = fH2O_target ./ (KH2O .* sqrt(fO2));
 
     % H2S now that fH2O known
+    logK_SO2 = 18880./T - 3.8018;  % SO2 = 0.5 S2 + O2
+    logK_H2S = 27103./T - 4.1973;  % H2S + 1.5 O2 = H2O + 0.5 S2
     fH2S = ( fH2O_target .* max(fSO2,realmin) ) ./ ( (max(fO2,realmin)).^1.5 .* 10.^(logK_H2S) );
 
     % CO via CO2/CO equilibrium
@@ -516,7 +583,7 @@ function [fCO2_bar, phase, details] = fco2_from_totalC( ...
     if ~isfinite(ln_high) || ln_high <= ln_low
         fCO2_bar = exp(ln_low); phase = 1;
         [wtCO3, wtCO2, Ccheck] = dissolvedCO2_at_f(fCO2_bar); 
-        details = struct('NBO',NBO,'fwone',fwone,'wtCO3',wtCO3,'wtCO2',wtCO2,'Ccheck',Ccheck, ...
+        details = struct('NBO',NBO,'fwone',fwone,'wtCO3',wtCO2,'wtCO2',wtCO2,'Ccheck',Ccheck, ...
                          'cap_fCO2_bar',fCO2_graph_bar,'Cmax_wt',Cmax_wt);
         return
     end
