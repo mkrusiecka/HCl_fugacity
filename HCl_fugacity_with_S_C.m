@@ -10,6 +10,8 @@ function Out = HCl_fugacity_with_S_C(~, opts)
 % CH4 equilibrium (Ohmoto & Kerrick, 1977):
 %   CH4 + 2 O2 = CO2 + 2 H2O
 %   log10 K = 41997/T + 0.719*log10(T) - 2.404   (T in K)
+% MRK - applied Flowers (1979) correction to Holloway's (1977) formulation
+% of MRK
 %
 % Input file: 'MI_Gas_SpeciationGEOROC.csv'
 % This version normalizes each row (oxides + H2O + CO2 + S + Cl) to 100 wt%.
@@ -17,12 +19,12 @@ function Out = HCl_fugacity_with_S_C(~, opts)
     %% ---------------- Options ----------------
     if nargin < 2, opts = struct; end
     if ~isfield(opts,'H2O_model'),     opts.H2O_model     = 'Moore'; end
-    if ~isfield(opts,'buffer_choice'), opts.buffer_choice = 'NNO+0.77'; end
+    if ~isfield(opts,'buffer_choice'), opts.buffer_choice = 'NNO-0.45'; end
     if ~isfield(opts,'doPlots'),       opts.doPlots       = true; end
     if ~isfield(opts,'outCSV'),        opts.outCSV        = 'Fugacities_STRICT.csv'; end
 
     %% ---------------- Load & normalize ----------------
-    data = load('MI_Gas_Speciation2.csv');
+    data = load('MI_Gas_SpeciationGEOROC.csv');
     pressure    = data(:,18);    % bar
     temperature = data(:,1);     % °C
     data = data';
@@ -99,34 +101,48 @@ function Out = HCl_fugacity_with_S_C(~, opts)
         fO2_bar = 10.^(base_logfO2 + buffer_offset);
         fO2_bar = max(fO2_bar, realmin);
     end
-
+    
     function phi = phi_pure_MRK_any(Pbar, Tkel, ic)
-        % Pure-component MRK fugacity coefficient 
-        if ~isfinite(Pbar) || Pbar <= 0, Pbar = 1; end
-        if ~isfinite(Tkel) || Tkel <= 0, Tkel = 1000; end
-        Rg = 0.08314472; % L·bar/mol·K
-        Tc = crit.Tc(ic); Pc = crit.Pc(ic);
-        a0 = 0.42748*(Rg^2)*(Tc^2.5)/Pc;   a  = a0 / sqrt(Tkel);
-        b  = 0.08664*Rg*Tc/Pc;
-        A  = a*Pbar / (Rg^2 * Tkel^2.5);
-        B  = b*Pbar / (Rg   * Tkel);
-        coeff = [1, -1, A - B - B^2, -A*B];
-        if any(~isfinite(coeff)), phi = 1.0; return; end
-        Zr = roots(coeff); Zr = Zr(abs(imag(Zr)) < 1e-12);
-        if isempty(Zr)
-            Z = max(B + 1e-12, 1);
-        else
-            Z = max(real(Zr)); if Z <= B, Z = B + 1e-12; end
-        end
-        lnTerm = log(1 + B/Z);
-        if B > 1e-12
-            lnphi = (Z - 1) - log(Z - B) - (A/B) * lnTerm;
-        else
-            lnphi = (Z - 1) - log(max(Z - B,1e-12)) - (A/max(Z,1e-12));
-        end
-        phi = exp(lnphi); if ~isfinite(phi) || phi <= 0, phi = 1.0; end
+    % Pure-component MRK fugacity coefficient (Flowers corrected)
+
+    if ~isfinite(Pbar) || Pbar <= 0, Pbar = 1; end
+    if ~isfinite(Tkel) || Tkel <= 0, Tkel = 1000; end
+
+    Rg = 0.08314472; % L·bar/mol·K
+    Tc = crit.Tc(ic); Pc = crit.Pc(ic);
+
+    a0 = 0.42748*(Rg^2)*(Tc^2.5)/Pc;
+    a  = a0 / sqrt(Tkel);
+    b  = 0.08664*Rg*Tc/Pc;
+
+    A  = a*Pbar / (Rg^2 * Tkel^2.5);
+    B  = b*Pbar / (Rg   * Tkel);
+
+    coeff = [1, -1, A - B - B^2, -A*B];
+    if any(~isfinite(coeff)), phi = 1.0; return; end
+
+    Zr = roots(coeff);
+    Zr = Zr(abs(imag(Zr)) < 1e-12);
+
+    if isempty(Zr)
+        Z = max(B + 1e-12, 1);
+    else
+        Z = max(real(Zr));
+        if Z <= B, Z = B + 1e-12; end
     end
 
+    % --- Flowers correction ---
+    V = Z * Rg * Tkel / Pbar;
+
+    lnphi = log(V/(V - b)) ...
+          + b/(V - b) ...
+          - (2*a)/(b*Rg*Tkel^(3/2)) * log((V + b)/V) ...
+          + (a)/(b*Rg*Tkel^(3/2)) * ( log((V + b)/V) - b/(V + b) ) ...
+          - log(Pbar * V / (Rg * Tkel));
+
+    phi = exp(lnphi);
+    if ~isfinite(phi) || phi <= 0, phi = 1.0; end
+end
     %% ---------------- fO2 @ input P ----------------
     fO2 = fO2_from_buffer(P, T, opts.buffer_choice);
     fO2 = max(fO2, realmin);
@@ -163,10 +179,8 @@ function Out = HCl_fugacity_with_S_C(~, opts)
                     aH2O(idx) = (X_H2O_O(idx))^2 * kw(idx);
                 end
             end
-            % pure-component φ for H2O at (P,T)
-            phiH2O_pure = arrayfun(@(Pi,Ti) phi_pure_MRK_any(Pi,Ti,iH2O), P, T);
-            fH2O_target = aH2O .* (phiH2O_pure .* P)./Po; % bar
-    end
+        fH2O_target = aH2O .* P ./ Po;% bar
+     end
 
     fH2O_target = max(fH2O_target, realmin);
     Cl_mes   = max(Cl_mes,   realmin);
@@ -470,13 +484,21 @@ function [y, phi, Z, info] = calc_mole_fractions_MRK(fug, P, T, crit, kIJ, opts)
             Z = max(real(Zr)); if Z <= B, Z = B + 1e-12; end
         end
 
-        lnTerm = log(1 + B/Z);
+        V = Z * R * T / P;
+
         phi = zeros(N,1);
         for ii = 1:N
-            bi_b  = b_i(ii)/max(b_mix,realmin);
-            sum_a = a_i_mix(ii);
-            lnphi = bi_b*(Z - 1) - log(Z - B) - (A/max(B,realmin)) * ( 2*sum_a/max(a_mix,realmin) - bi_b ) * lnTerm;
-            phi(ii) = exp(lnphi);
+        bi = b_i(ii);
+        Si = a_i_mix(ii);
+
+        lnphi = log(V/(V - b_mix)) ...
+          + bi/(V - b_mix) ...
+          - (2*Si)/(b_mix*R*T^(3/2)) * log((V + b_mix)/V) ...
+          + (a_mix*bi)/(b_mix^2*R*T^(3/2)) * ...
+            ( log((V + b_mix)/V) - b_mix/(V + b_mix) ) ...
+          - log(P * V / (R * T));
+
+        phi(ii) = exp(lnphi);
         end
 
         denom = phi * P;
@@ -548,13 +570,14 @@ function [fCO2_bar, phase, details] = fco2_from_totalC( ...
         logK1 = 2.450e-1 + (2.027e4)/T_K + (-4.730e4)/(T_K.^2) + (1.949e-7*(PPa - 0.001e9))/T_K;
     end
     fCO2_graph_bar = 10.^logK1 .* fO2;
-    phase = 2 + double(Pkbar >= trans_P_kbar);   % 2 graphite, 3 diamond
+    phase = 2 + double(Pkbar >= trans_P_kbar);
 
     Fco3 = [2.384e-5, -1.6448e5, 1.4732e3, -43.6385, 3.2910, 1.6800e5, 1.7590e5, 2.1085e5];
     Fco2 = [1.9244e-5, -9.0212e4, 1.1149e3, -43.0815, -7.0937];
 
     function [wtCO3, wtCO2, total_wt] = dissolvedCO2_at_f(fco2_bar)
-        X1 = PPa; X2 = T_K; X3 = log(fco2_bar); X4 = NBO; X5 = X_CaO; X6 = X_Na2O; X7 = X_K2O;
+        X1 = PPa; X2 = T_K; X3 = log(max(fco2_bar,1e-30)); 
+        X4 = NBO; X5 = X_CaO; X6 = X_Na2O; X7 = X_K2O;
         ln_x_co3 = -(Fco3(1)*X1)/(R*X2) + Fco3(2)/(R*X2) + (X3*Fco3(3))/X2 + Fco3(4)/R + ...
                    (Fco3(5)*X4) + (Fco3(6)*X5 + Fco3(7)*X6 + Fco3(8)*X7)/(R*X2);
         ln_x_co2 = -(Fco2(1)*X1)/(R*X2) + Fco2(2)/(R*X2) + (X3*Fco2(3))/X2 + Fco2(4)/R + ...
@@ -573,49 +596,36 @@ function [fCO2_bar, phase, details] = fco2_from_totalC( ...
         return
     end
 
-    % Robust bracket & solve
     fmin = 1e-100;
-    fun  = @(lnf) (dissolvedCO2_at_f(exp(lnf)) - totalCO2_wt);
+    fun = @(lnf) total_dissolved_CO2(exp(lnf)) - totalCO2_wt;
+
+    function total_wt = total_dissolved_CO2(fco2_bar)
+        [~, ~, total_wt] = dissolvedCO2_at_f(fco2_bar);
+    end
 
     ln_low  = log(max(fmin, realmin));
     ln_high = log(max(fCO2_graph_bar, 1e-50)) - 1e-9;
 
-    if ~isfinite(ln_high) || ln_high <= ln_low
-        fCO2_bar = exp(ln_low); phase = 1;
-        [wtCO3, wtCO2, Ccheck] = dissolvedCO2_at_f(fCO2_bar); 
-        details = struct('NBO',NBO,'fwone',fwone,'wtCO3',wtCO2,'wtCO2',wtCO2,'Ccheck',Ccheck, ...
-                         'cap_fCO2_bar',fCO2_graph_bar,'Cmax_wt',Cmax_wt);
-        return
-    end
-
     L = linspace(ln_low, ln_high, 80);
-    V = arrayfun(fun, L); V(~isfinite(V)) = sign(V(~isfinite(V))) .* 1e3;
-
-    if all(V < 0)
-        fCO2_bar = fCO2_graph_bar; phase = 2 + double((P_bar/1000) >= trans_P_kbar);
-        details  = struct('NBO',NBO,'fwone',fwone,'Cmax_wt',Cmax_wt,'cap_fCO2_bar',fCO2_graph_bar);
-        return
-    end
-    if all(V > 0)
-        fCO2_bar = exp(ln_low); phase = 1;
-        [wtCO3, wtCO2, Ccheck] = dissolvedCO2_at_f(fCO2_bar);
-        details  = struct('NBO',NBO,'fwone',fwone,'wtCO3',wtCO3,'wtCO2',wtCO2,'Ccheck',Ccheck, ...
-                          'cap_fCO2_bar',fCO2_graph_bar,'Cmax_wt',Cmax_wt);
-        return
-    end
+    V = arrayfun(fun, L);
 
     idx = find(V(1:end-1).*V(2:end) <= 0, 1, 'first');
     if isempty(idx)
-        obj = @(lnf) (fun(lnf)).^2;
-        lnfCO2 = fminbnd(obj, ln_low, ln_high);
+        lnfCO2 = fminbnd(@(lnf) fun(lnf).^2, ln_low, ln_high);
     else
         lnfCO2 = fzero(fun, [L(idx), L(idx+1)]);
     end
 
     fCO2_bar = exp(lnfCO2);
-    phase    = 1;
 
-    [wtCO3, wtCO2, Ccheck] = dissolvedCO2_at_f(fCO2_bar); 
+    if ~isfinite(fCO2_bar) || fCO2_bar <= 0
+        fCO2_bar = 1e-20;
+    end
+    fCO2_bar = min(fCO2_bar, 0.95 * P_bar);
+
+    phase = 1;
+
+    [wtCO3, wtCO2, Ccheck] = dissolvedCO2_at_f(fCO2_bar);
     details = struct('NBO',NBO,'fwone',fwone,'wtCO3',wtCO3,'wtCO2',wtCO2,'Ccheck',Ccheck, ...
                      'cap_fCO2_bar',fCO2_graph_bar,'Cmax_wt',Cmax_wt);
 end
